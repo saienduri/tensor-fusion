@@ -707,3 +707,10 @@ data:
       vendor: AMD
       costPerHour: 0.2
       fp16TFlops: 122.8
+
+    # AMD Instinct MI Series (Datacenter GPUs)
+    - model: MI325X
+      fullModelName: "AMD Instinct MI325X"
+      vendor: AMD
+      costPerHour: 4.5
+      fp16TFlops: 1307
