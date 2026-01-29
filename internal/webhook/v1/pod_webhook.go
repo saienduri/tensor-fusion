@@ -95,6 +95,33 @@ func (m *TensorFusionPodMutator) Handle(ctx context.Context, req admission.Reque
 	log := log.FromContext(ctx)
 	log.Info("Mutating pod", "generateName", pod.GenerateName, "namespace", pod.Namespace)
 
+	// Skip worker pods - they are already configured by the connection controller
+	// Only process host port allocation for them
+	if utils.IsTensorFusionWorker(pod) {
+		if pod.Labels[constants.GenHostPortLabel] == constants.GenHostPortLabelValue {
+			log.Info("Worker pod webhook path: assigning host port", "pod", pod.Name, "ns", pod.Namespace, "portName", pod.Labels[constants.GenHostPortNameLabel])
+			currentBytes, err := json.Marshal(pod)
+			if err != nil {
+				return admission.Errored(http.StatusBadRequest, fmt.Errorf("failed to marshal worker pod: %w", err))
+			}
+			if err := m.generateHostPort(pod, pod.Labels[constants.GenHostPortNameLabel]); err != nil {
+				log.Error(err, "Worker pod webhook path: host port assignment failed", "pod", pod.Name, "ns", pod.Namespace)
+				return admission.Errored(http.StatusInternalServerError, fmt.Errorf("can not generate host port for worker: %w", err))
+			}
+			patchedBytes, err := json.Marshal(pod)
+			if err != nil {
+				return admission.Errored(http.StatusBadRequest, fmt.Errorf("failed to marshal patched worker pod: %w", err))
+			}
+			patches, err := jsonpatch.CreatePatch(currentBytes, patchedBytes)
+			if err != nil {
+				return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to create patch for worker pod: %w", err))
+			}
+			log.Info("Worker pod webhook path: host port assigned", "pod", pod.Name, "ns", pod.Namespace)
+			return admission.Patched("host port allocated for external worker", patches...)
+		}
+		return admission.Allowed("worker pod, skipped")
+	}
+
 	var currentBytes []byte
 
 	// for non tensor fusion pod, check if there are any GPU resource request,

@@ -278,6 +278,27 @@ const GiBToBytes = 1024 * 1024 * 1024
 const AuthorizationHeader = "Authorization"
 const ExtraVerificationInfoPodIDKey = "authentication.kubernetes.io/pod-uid"
 
+// External connection constants
+const (
+	ExternalConnectionAPIKeyHeader  = "X-API-Key"
+	ExternalConnectionSecretName      = "tensor-fusion-api-keys"
+	ExternalConnectionSecretDataKey   = "keys.json"
+	ExternalConnectionSecretNamespace = "tensor-fusion"
+
+	// Default TTL bounds for external connections (in seconds)
+	ExternalConnectionMinTTL     = 60    // 1 minute
+	ExternalConnectionMaxTTL     = 86400 // 24 hours
+	ExternalConnectionDefaultTTL = 3600  // 1 hour
+)
+
+// External connection label keys (depend on Domain variable)
+var (
+	ExternalConnectionLabelKey    = Domain + "/external-client"
+	ExternalConnectionClientIDKey = Domain + "/client-id"
+	// NodePublicIPAnnotation is used to specify a node's public IP for external connections
+	NodePublicIPAnnotation = Domain + "/public-ip"
+)
+
 const SchedulerSimulationKey = "simulate-schedule"
 
 const MobileGpuClockSpeedMultiplier = 0.75

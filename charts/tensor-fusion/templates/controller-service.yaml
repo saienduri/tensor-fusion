@@ -4,9 +4,17 @@ metadata:
   name: {{ include "tensor-fusion.fullname" . }}
   namespace: {{ include "tensor-fusion.namespace" . }}
 spec:
+  {{- if .Values.externalConnections.enabled }}
+  type: {{ .Values.externalConnections.service.type | default "ClusterIP" }}
+  {{- end }}
   ports:
     - port: 8080
       protocol: TCP
       targetPort: 8080
+      {{- if and .Values.externalConnections.enabled (eq .Values.externalConnections.service.type "NodePort") }}
+      {{- if .Values.externalConnections.service.nodePort }}
+      nodePort: {{ .Values.externalConnections.service.nodePort }}
+      {{- end }}
+      {{- end }}
   selector:
     {{- include "tensor-fusion.controller.selectorLabels" . | nindent 6 }}

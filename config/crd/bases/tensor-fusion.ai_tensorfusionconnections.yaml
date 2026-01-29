@@ -29,7 +29,16 @@ spec:
       type: string
     - jsonPath: .spec.clientPod
       name: Client Pod
+      priority: 1
       type: string
+    - jsonPath: .spec.externalClient
+      name: External
+      priority: 1
+      type: boolean
+    - jsonPath: .status.expiresAt
+      name: Expires At
+      priority: 1
+      type: date
     name: v1
     schema:
       openAPIV3Schema:
@@ -57,11 +66,30 @@ spec:
             description: TensorFusionConnectionSpec defines the desired state of TensorFusionConnection.
             properties:
               clientPod:
+                description: ClientPod is the name of the client pod (for in-cluster
+                  clients)
                 type: string
+              externalClient:
+                description: |-
+                  ExternalClient configuration for clients outside the Kubernetes cluster
+                  Mutually exclusive with ClientPod
+                properties:
+                  clientId:
+                    description: Unique identifier for the external client
+                    type: string
+                  ttlSeconds:
+                    description: TTL in seconds - connection will be garbage collected
+                      after this duration
+                    format: int64
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                required:
+                - ttlSeconds
+                type: object
               workloadName:
                 type: string
             required:
-            - clientPod
             - workloadName
             type: object
           status:
@@ -69,6 +97,11 @@ spec:
               TensorFusionConnection.
             properties:
               connectionURL:
+                type: string
+              expiresAt:
+                description: ExpiresAt is when this connection expires (for external
+                  clients with TTL)
+                format: date-time
                 type: string
               phase:
                 type: string

@@ -493,3 +493,33 @@ dynamicConfig:
       summary: "Idle GPU found: {{ .uuid }} on Node {{ .node }}"
       description: "GPU {{ .uuid }} on Node {{ .node }} in Pool {{ .pool }} has been idle for 3 consecutive 10m, compute: {{ .compute }}, vram: {{ .vram }}"
       alertTargetInstance: "{{ .uuid }}"
+
+# External Connections API configuration
+# Enables clients outside the Kubernetes cluster to use TensorFusion GPU resources
+externalConnections:
+  # Enable external connections API
+  enabled: false
+  
+  # Service configuration for external access
+  service:
+    # Service type: ClusterIP, NodePort, or LoadBalancer
+    type: NodePort
+    # NodePort to use (only when type is NodePort, leave empty for auto-assign)
+    nodePort: 30080
+  
+  # API keys configuration
+  # Option 1: Use an existing secret (recommended for production)
+  #   Create secret manually: kubectl create secret generic tensor-fusion-api-keys --from-file=keys.json
+  # Option 2: Let Helm create the secret from apiKeys below (for development only)
+  existingSecret: ""  # Set to secret name to use existing secret
+  
+  # API keys (only used if existingSecret is empty)
+  # To generate a bcrypt hash: 
+  #   go run -e 'import "golang.org/x/crypto/bcrypt"; h,_:=bcrypt.GenerateFromPassword([]byte("your-key"),10); println(string(h))'
+  # Or use htpasswd: htpasswd -nbB "" "your-api-key" | cut -d: -f2
+  apiKeys: {}
+  # Example:
+  #   team-alpha:
+  #     hash: "$2a$10$..."
+  #     owner: "alpha-team@company.com"
+  #     namespaces: []  # Empty = all namespaces

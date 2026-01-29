@@ -60,10 +60,35 @@ func (r Resources) IsZero() bool {
 		r.Limits.Vram.IsZero()
 }
 
+// ExternalClientSpec defines configuration for external (non-Kubernetes) clients
+type ExternalClientSpec struct {
+	// Unique identifier for the external client
+	// +optional
+	ClientID string `json:"clientId,omitempty"`
+
+	// TTL in seconds - connection will be garbage collected after this duration
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	TTLSeconds int64 `json:"ttlSeconds"`
+}
+
 // TensorFusionConnectionSpec defines the desired state of TensorFusionConnection.
 type TensorFusionConnectionSpec struct {
 	WorkloadName string `json:"workloadName"`
-	ClientPod    string `json:"clientPod"`
+
+	// ClientPod is the name of the client pod (for in-cluster clients)
+	// +optional
+	ClientPod string `json:"clientPod,omitempty"`
+
+	// ExternalClient configuration for clients outside the Kubernetes cluster
+	// Mutually exclusive with ClientPod
+	// +optional
+	ExternalClient *ExternalClientSpec `json:"externalClient,omitempty"`
+}
+
+// IsExternal returns true if this connection is for an external client
+func (s *TensorFusionConnectionSpec) IsExternal() bool {
+	return s.ExternalClient != nil
 }
 
 // TensorFusionConnectionStatus defines the observed state of TensorFusionConnection.
@@ -71,6 +96,10 @@ type TensorFusionConnectionStatus struct {
 	Phase         WorkerPhase `json:"phase"`
 	ConnectionURL string      `json:"connectionURL"`
 	WorkerName    string      `json:"workerName"`
+
+	// ExpiresAt is when this connection expires (for external clients with TTL)
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -79,7 +108,9 @@ type TensorFusionConnectionStatus struct {
 // +kubebuilder:printcolumn:name="Connection URL",type="string",JSONPath=".status.connectionURL"
 // +kubebuilder:printcolumn:name="Worker Name",type="string",JSONPath=".status.workerName"
 // +kubebuilder:printcolumn:name="Workload Name",type="string",JSONPath=".spec.workloadName"
-// +kubebuilder:printcolumn:name="Client Pod",type="string",JSONPath=".spec.clientPod"
+// +kubebuilder:printcolumn:name="Client Pod",type="string",JSONPath=".spec.clientPod",priority=1
+// +kubebuilder:printcolumn:name="External",type="boolean",JSONPath=".spec.externalClient",priority=1
+// +kubebuilder:printcolumn:name="Expires At",type="date",JSONPath=".status.expiresAt",priority=1
 
 // TensorFusionConnection is the Schema for the tensorfusionconnections API.
 type TensorFusionConnection struct {

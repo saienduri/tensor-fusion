@@ -345,8 +345,9 @@ func startHttpServerForTFClient(
 		setupLog.Error(err, "failed to create node scaler info router")
 		os.Exit(1)
 	}
+	externalConnectionRouter := router.NewExternalConnectionRouter(client)
 	httpServer := server.NewHTTPServer(
-		connectionRouter, assignHostPortRouter, assignIndexRouter, allocatorInfoRouter, nodeScalerInfoRouter, leaderChan,
+		connectionRouter, assignHostPortRouter, assignIndexRouter, allocatorInfoRouter, nodeScalerInfoRouter, externalConnectionRouter, leaderChan,
 	)
 	go func() {
 		// Port defaults to 8080, set with env var `PORT`
