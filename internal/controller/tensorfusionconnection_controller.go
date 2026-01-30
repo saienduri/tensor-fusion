@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	goerrors "errors"
 
@@ -75,6 +76,11 @@ func (r *TensorFusionConnectionReconciler) Reconcile(ctx context.Context, req ct
 		return ctrl.Result{}, err
 	}
 
+	// Handle TTL expiry for external connections
+	if result, done := r.handleExternalConnectionTTL(ctx, connection); done {
+		return result, nil
+	}
+
 	workloadName := connection.Labels[constants.WorkloadKey]
 	workload := &tfv1.TensorFusionWorkload{}
 	if err := r.Get(ctx, client.ObjectKey{Name: workloadName, Namespace: connection.Namespace}, workload); err != nil {
@@ -95,7 +101,8 @@ func (r *TensorFusionConnectionReconciler) Reconcile(ctx context.Context, req ct
 
 	// connection is fine and worker status is fine, do nothing
 	if !needSelectWorker {
-		return ctrl.Result{}, nil
+		// For external connections, requeue at expiry time
+		return r.requeueForExternalConnection(connection), nil
 	}
 
 	log.Info("Selecting worker for connection", "connection", connection.Name, "namespace", connection.Namespace)
@@ -108,6 +115,53 @@ func (r *TensorFusionConnectionReconciler) Reconcile(ctx context.Context, req ct
 	}
 }
 
+// handleExternalConnectionTTL checks if an external connection has expired and deletes it if so.
+// Returns (result, true) if the connection was handled (expired and deleted), (result, false) otherwise.
+func (r *TensorFusionConnectionReconciler) handleExternalConnectionTTL(ctx context.Context, connection *tfv1.TensorFusionConnection) (ctrl.Result, bool) {
+	// Only handle external connections with TTL
+	if !connection.Spec.IsExternal() || connection.Status.ExpiresAt == nil {
+		return ctrl.Result{}, false
+	}
+
+	log := log.FromContext(ctx)
+	now := time.Now()
+	expiresAt := connection.Status.ExpiresAt.Time
+
+	// Check if connection has expired
+	if now.After(expiresAt) {
+		log.Info("External connection expired, deleting", "connection", connection.Name, "expiresAt", expiresAt)
+		r.Recorder.Eventf(connection, v1.EventTypeNormal, "ConnectionExpired", "External connection TTL expired, deleting")
+
+		if err := r.Delete(ctx, connection); err != nil {
+			if !errors.IsNotFound(err) {
+				log.Error(err, "Failed to delete expired external connection", "connection", connection.Name)
+				// Requeue to retry deletion
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, true
+			}
+		}
+		return ctrl.Result{}, true
+	}
+
+	return ctrl.Result{}, false
+}
+
+// requeueForExternalConnection returns a Result with RequeueAfter set for external connections
+// to ensure they are cleaned up when their TTL expires.
+func (r *TensorFusionConnectionReconciler) requeueForExternalConnection(connection *tfv1.TensorFusionConnection) ctrl.Result {
+	if !connection.Spec.IsExternal() || connection.Status.ExpiresAt == nil {
+		return ctrl.Result{}
+	}
+
+	timeUntilExpiry := time.Until(connection.Status.ExpiresAt.Time)
+	if timeUntilExpiry <= 0 {
+		// Already expired, requeue immediately
+		return ctrl.Result{Requeue: true}
+	}
+
+	// Add a small buffer to ensure we don't miss the expiry
+	return ctrl.Result{RequeueAfter: timeUntilExpiry + time.Second}
+}
+
 func (r *TensorFusionConnectionReconciler) syncDedicatedWorkerStatus(ctx context.Context, connection *tfv1.TensorFusionConnection, vendor string) error {
 	pod := &v1.Pod{}
 	if err := r.Get(ctx, client.ObjectKey{Name: connection.Name, Namespace: connection.Namespace}, pod); err != nil {
@@ -117,19 +171,96 @@ func (r *TensorFusionConnectionReconciler) syncDedicatedWorkerStatus(ctx context
 		// dedicated worker pod is not running, wait for it to be running,
 		// pod watcher will trigger reconcile, no need to requeue
 		return nil
-	} else {
-		connection.Status.Phase = tfv1.WorkerRunning
-		connection.Status.WorkerName = pod.Name
-		revision := pod.ResourceVersion
-		if revision == "" {
-			revision = "0"
-		}
-		setConnectionWorkerURL(connection, pod.Status.PodIP, pod.Name, revision, vendor)
-		if err := r.Status().Update(ctx, connection); err != nil {
-			return fmt.Errorf("failed to update connection status: %w", err)
-		}
-		return nil
 	}
+
+	connection.Status.Phase = tfv1.WorkerRunning
+	connection.Status.WorkerName = pod.Name
+	revision := pod.ResourceVersion
+	if revision == "" {
+		revision = "0"
+	}
+
+	// For external connections, use node IP + host port instead of pod IP
+	if connection.Spec.IsExternal() {
+		hostIP, hostPort := getWorkerHostAccess(pod)
+		if hostIP != "" && hostPort > 0 {
+			// Try to get public IP from node annotation for external access
+			if publicIP := r.getNodePublicIP(ctx, pod.Spec.NodeName); publicIP != "" {
+				log.FromContext(ctx).Info("Using node public IP for external connection", "node", pod.Spec.NodeName, "publicIP", publicIP)
+				hostIP = publicIP
+			}
+			setConnectionWorkerURLWithHost(connection, hostIP, hostPort, pod.Name, revision, vendor)
+		} else {
+			// Host port not yet assigned, wait for webhook to assign it
+			log.FromContext(ctx).Info("Waiting for host port assignment",
+				"pod", pod.Name,
+				"node", pod.Spec.NodeName,
+				"hostIP", pod.Status.HostIP,
+				"observedHostPort", hostPort,
+				"labelEnabled", pod.Labels[constants.TensorFusionEnabledLabelKey],
+				"labelHostPort", pod.Labels[constants.GenHostPortLabel],
+				"labelPortName", pod.Labels[constants.GenHostPortNameLabel],
+			)
+			return nil
+		}
+	} else {
+		setConnectionWorkerURL(connection, pod.Status.PodIP, pod.Name, revision, vendor)
+	}
+
+	if err := r.Status().Update(ctx, connection); err != nil {
+		return fmt.Errorf("failed to update connection status: %w", err)
+	}
+	return nil
+}
+
+// getWorkerHostAccess extracts the host IP and port from a worker pod configured for external access
+func getWorkerHostAccess(pod *v1.Pod) (string, int32) {
+	// Get host IP from pod status
+	hostIP := pod.Status.HostIP
+	if hostIP == "" {
+		return "", 0
+	}
+
+	// Get host port from container spec (set by webhook via port allocator)
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			if port.Name == constants.TensorFusionRemoteWorkerPortName && port.HostPort > 0 {
+				return hostIP, port.HostPort
+			}
+		}
+	}
+
+	return hostIP, 0
+}
+
+// getNodePublicIP looks up the node and returns its public IP if annotated
+func (r *TensorFusionConnectionReconciler) getNodePublicIP(ctx context.Context, nodeName string) string {
+	if nodeName == "" {
+		return ""
+	}
+
+	node := &v1.Node{}
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		log.FromContext(ctx).V(6).Info("Failed to get node for public IP lookup", "node", nodeName, "error", err)
+		return ""
+	}
+
+	if node.Annotations != nil {
+		if publicIP, ok := node.Annotations[constants.NodePublicIPAnnotation]; ok && publicIP != "" {
+			return publicIP
+		}
+	}
+
+	return ""
+}
+
+// setConnectionWorkerURLWithHost sets the connection URL using host IP and port (for external connections)
+func setConnectionWorkerURLWithHost(connection *tfv1.TensorFusionConnection, hostIP string, hostPort int32, podName string, revision string, vendor string) {
+	protocol := "native"
+	if vendor == constants.AcceleratorVendorAMD {
+		protocol = "hip"
+	}
+	connection.Status.ConnectionURL = fmt.Sprintf("%s+%s+%d+%s-%s", protocol, hostIP, hostPort, podName, revision)
 }
 
 func setConnectionWorkerURL(connection *tfv1.TensorFusionConnection, podIp string, podName string, revision string, vendor string) {
@@ -380,6 +511,24 @@ func (r *TensorFusionConnectionReconciler) startDedicatedWorkerPod(ctx context.C
 	pod.Labels[constants.WorkloadKey] = workload.Name
 	pod.Labels[constants.LabelKeyPodTemplateHash] = podTemplateHash
 	pod.Annotations[constants.DedicatedWorkerAnnotation] = constants.TrueStringValue
+
+	// For external connections, enable host port allocation so external clients can reach the worker
+	if connection.Spec.IsExternal() {
+		pod.Labels[constants.GenHostPortLabel] = constants.GenHostPortLabelValue
+		pod.Labels[constants.GenHostPortNameLabel] = constants.TensorFusionRemoteWorkerPortName
+		pod.Labels[constants.ExternalConnectionLabelKey] = constants.TrueStringValue
+		// The pod mutating webhook is guarded by an objectSelector requiring this label.
+		// We set it for external dedicated workers so the webhook can assign HostPort.
+		pod.Labels[constants.TensorFusionEnabledLabelKey] = constants.TrueStringValue
+		log.FromContext(ctx).Info("External connection worker pod prepared for host port allocation",
+			"connection", connection.Name,
+			"pod", pod.Name,
+			"ns", pod.Namespace,
+			"labelEnabled", pod.Labels[constants.TensorFusionEnabledLabelKey],
+			"labelHostPort", pod.Labels[constants.GenHostPortLabel],
+			"labelPortName", pod.Labels[constants.GenHostPortNameLabel],
+		)
+	}
 
 	// Add finalizer for GPU resource cleanup
 	pod.Finalizers = append(pod.Finalizers, constants.Finalizer)

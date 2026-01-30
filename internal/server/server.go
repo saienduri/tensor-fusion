@@ -16,6 +16,7 @@ func NewHTTPServer(
 	ai *router.AssignIndexRouter,
 	alc *router.AllocatorInfoRouter,
 	nsi *router.NodeScalerInfoRouter,
+	ecr *router.ExternalConnectionRouter,
 	leaderChan <-chan struct{},
 ) *gin.Engine {
 
@@ -61,5 +62,16 @@ func NewHTTPServer(
 		ctx.JSON(http.StatusOK, gin.H{"config": config.GetGlobalConfig()})
 	})
 	apiGroup.GET("/node-scaler", nsi.Get)
+
+	// External connections API (v1) for clients outside the Kubernetes cluster
+	if ecr != nil {
+		extConnGroup := r.Group("/api/v1/external-connections")
+		extConnGroup.POST("", ecr.Create)
+		extConnGroup.GET("", ecr.List)
+		extConnGroup.GET("/:namespace/:name", ecr.Get)
+		extConnGroup.DELETE("/:namespace/:name", ecr.Delete)
+		extConnGroup.POST("/:namespace/:name/refresh", ecr.Refresh)
+	}
+
 	return r
 }

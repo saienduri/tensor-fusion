@@ -101,3 +101,32 @@ schedulerConfig:
 #   - componentConfig.worker.image (HIP worker image)
 #   - componentConfig.client.providerImage (client stub image)
 # ==============================================================================
+
+# ==============================================================================
+# External Connections API
+# ==============================================================================
+# Enables clients outside the Kubernetes cluster to use TensorFusion GPUs.
+#
+# Setup:
+#   1. Create API keys secret:
+#      kubectl create secret generic tensor-fusion-api-keys \
+#        --from-file=keys.json=/path/to/keys.json -n tensor-fusion-sys
+#
+#   2. keys.json format:
+#      {
+#        "test-user": {
+#          "hash": "$2a$10$...",  # bcrypt hash of API key
+#          "owner": "user@example.com",
+#          "namespaces": []       # empty = all namespaces
+#        }
+#      }
+#
+#   3. Generate bcrypt hash:
+#      go run -e 'import "golang.org/x/crypto/bcrypt"; h,_:=bcrypt.GenerateFromPassword([]byte("your-key"),10); println(string(h))'
+# ==============================================================================
+externalConnections:
+  enabled: true
+  service:
+    type: NodePort
+    nodePort: 30080
+  existingSecret: "tensor-fusion-api-keys"  # Create this secret before helm install

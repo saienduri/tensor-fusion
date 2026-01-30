@@ -9,6 +9,7 @@ rules:
   - configmaps
   - events
   - namespaces
+  - secrets
   verbs:
   - create
   - get
