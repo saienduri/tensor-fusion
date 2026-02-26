@@ -68,6 +68,9 @@ RUN mkdir -p /usr/lib/tensor-fusion
 # Copy the worker service binary
 COPY --from=builder /build/hip_worker_service /usr/lib/tensor-fusion/
 
+# Copy pre-built HIP limiter for VRAM enforcement (built from vgpu.rs hip-limiter crate)
+COPY artifacts/libhip_limiter.so /usr/lib/tensor-fusion/libhip_limiter.so
+
 # Set runtime environment
 ENV ROCM_PATH=/opt/rocm
 ENV PATH=${ROCM_PATH}/bin:${PATH}

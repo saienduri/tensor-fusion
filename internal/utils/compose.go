@@ -243,7 +243,7 @@ func AddTFDefaultClientConfBeforePatch(
 			Requests: injectLibResource,
 			Limits:   injectLibResource,
 		},
-		Env: configureFeatures4InjectLib(tfInfo.Profile.IsLocalGPU, tfInfo.Profile.GPUVendor, pod.Annotations[constants.DisableFeaturesAnnotation]),
+		Env: configureFeatures4InjectLib(tfInfo.Profile.IsLocalGPU, tfInfo.Profile.GPUVendor, pod.Annotations[constants.DisableFeaturesAnnotation], string(tfInfo.Profile.Isolation)),
 	})
 	pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
 		Name: constants.TFLibsVolumeName,
@@ -437,8 +437,8 @@ func convertDisabledFeaturesToEnvs(disabledFeatures string, envList []v1.EnvVar)
 	return envList
 }
 
-func configureFeatures4InjectLib(isLocalGPU bool, vendor string, disabledFeatures string) []v1.EnvVar {
-	envList := make([]v1.EnvVar, 0, 4)
+func configureFeatures4InjectLib(isLocalGPU bool, vendor string, disabledFeatures string, isolation string) []v1.EnvVar {
+	envList := make([]v1.EnvVar, 0, 5)
 
 	// Pass local GPU flag to init container for mode selection
 	envList = append(envList, v1.EnvVar{
@@ -451,6 +451,14 @@ func configureFeatures4InjectLib(isLocalGPU bool, vendor string, disabledFeature
 		envList = append(envList, v1.EnvVar{
 			Name:  constants.TFHardwareVendorEnv,
 			Value: vendor,
+		})
+	}
+
+	// Pass isolation mode so init container can set up the correct interception
+	if isolation != "" {
+		envList = append(envList, v1.EnvVar{
+			Name:  "TF_ISOLATION_MODE",
+			Value: isolation,
 		})
 	}
 
@@ -831,6 +839,11 @@ func composeHypervisorContainer(spec *v1.PodSpec, pool *tfv1.GPUPool, vendor str
 	}, v1.EnvVar{
 		Name:  constants.HypervisorDetectUsedGPUEnv,
 		Value: fmt.Sprintf("%t", IsProgressiveMigration()),
+	}, v1.EnvVar{
+		// Hypervisor stamps GPUs with this isolation mode; must match the workload default ("soft")
+		// so the scheduler's GPUIsolationModeFilter doesn't reject GPUs.
+		Name:  "TF_ISOLATION_MODE",
+		Value: string(tfv1.IsolationModeSoft),
 	})
 
 	if pool.Spec.ComponentConfig.Hypervisor.Image != "" {
@@ -989,15 +1002,19 @@ func SetWorkerContainerSpec(
 		})
 	}
 
-	// GPU limiter is currently CUDA-based (libcuda_limiter.so). Do NOT inject it for AMD workers.
-	// AMD remote HIP worker should run without CUDA LD_PRELOAD.
-	if workloadProfile.GPUVendor != constants.AcceleratorVendorAMD &&
-		!strings.Contains(disabledFeatures, constants.BuiltInFeaturesGpuLimiter) {
+	// Inject vendor-appropriate GPU limiter via LD_PRELOAD unless disabled.
+	// NVIDIA: libcuda_limiter.so intercepts CUDA APIs
+	// AMD:   libhip_limiter.so intercepts HIP APIs (memory enforcement)
+	if !strings.Contains(disabledFeatures, constants.BuiltInFeaturesGpuLimiter) {
+		limiterPath := constants.LdPreloadLimiter // NVIDIA default
+		if workloadProfile.GPUVendor == constants.AcceleratorVendorAMD {
+			limiterPath = constants.LdPreloadHipLimiter
+		}
 		// TODO: In hard isolation mode, current implementation relies on limiter to set CUDA_VISIBLE_DEVICES env.
 		// In next hypervisor versions, device allocation will be handled by device-plugin, so LD_PRELOAD should be removed.
 		container.Env = append(container.Env, v1.EnvVar{
 			Name:  constants.LdPreloadEnv,
-			Value: constants.LdPreloadLimiter,
+			Value: limiterPath,
 		})
 	}
 

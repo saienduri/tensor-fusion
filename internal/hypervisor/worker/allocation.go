@@ -2,11 +2,15 @@ package worker
 
 import (
 	"maps"
+	"path/filepath"
 	"sync"
+	"time"
 
 	tfv1 "github.com/NexusGPU/tensor-fusion/api/v1"
+	"github.com/NexusGPU/tensor-fusion/internal/constants"
 	"github.com/NexusGPU/tensor-fusion/internal/hypervisor/api"
 	"github.com/NexusGPU/tensor-fusion/internal/hypervisor/framework"
+	workerstate "github.com/NexusGPU/tensor-fusion/internal/hypervisor/worker/state"
 	"github.com/samber/lo"
 	"k8s.io/klog/v2"
 )
@@ -19,16 +23,46 @@ type AllocationController struct {
 	mu                sync.RWMutex
 	workerAllocations map[string]*api.WorkerAllocation
 	deviceAllocations map[string][]*api.WorkerAllocation
+
+	// Shared memory for limiter communication (soft/hard isolation)
+	shmBasePath string
+	shmHandles  map[string]*workerstate.SharedMemoryHandle
+	shmStopCh   chan struct{}
 }
 
 var _ framework.WorkerAllocationController = &AllocationController{}
 
 // NewAllocationController creates a new AllocationController
 func NewAllocationController(deviceController framework.DeviceController) *AllocationController {
-	return &AllocationController{
+	shmBasePath := filepath.Join(constants.TFDataPath, constants.SharedMemMountSubPath)
+	ac := &AllocationController{
 		deviceController:  deviceController,
 		workerAllocations: make(map[string]*api.WorkerAllocation, 32),
 		deviceAllocations: make(map[string][]*api.WorkerAllocation, 32),
+		shmBasePath:       shmBasePath,
+		shmHandles:        make(map[string]*workerstate.SharedMemoryHandle, 32),
+		shmStopCh:         make(chan struct{}),
+	}
+	go ac.heartbeatLoop()
+	return ac
+}
+
+// heartbeatLoop periodically updates the LastHeartbeat in all active SHM handles
+func (a *AllocationController) heartbeatLoop() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.shmStopCh:
+			return
+		case <-ticker.C:
+			a.mu.RLock()
+			now := uint64(time.Now().Unix())
+			for _, handle := range a.shmHandles {
+				handle.GetState().UpdateHeartbeat(now)
+			}
+			a.mu.RUnlock()
+		}
 	}
 }
 
@@ -98,7 +132,38 @@ func (a *AllocationController) AllocateWorkerDevices(request *api.WorkerInfo) (*
 	for _, deviceUUID := range deviceIDs {
 		a.addDeviceAllocation(deviceUUID, allocation)
 	}
+
+	// Create shared memory for limiter communication (soft/hard isolation)
+	if request.IsolationMode == tfv1.IsolationModeSoft || request.IsolationMode == tfv1.IsolationModeHard {
+		a.createShmForAllocation(request, allocation)
+	}
+
 	return allocation, nil
+}
+
+// createShmForAllocation creates the shared memory file for a worker allocation
+func (a *AllocationController) createShmForAllocation(request *api.WorkerInfo, allocation *api.WorkerAllocation) {
+	podPath := filepath.Join(a.shmBasePath, request.Namespace, request.WorkerName)
+	vramLimit := uint64(request.Limits.Vram.Value())
+
+	configs := make([]workerstate.DeviceConfig, 0, len(allocation.DeviceInfos))
+	for i, deviceInfo := range allocation.DeviceInfos {
+		configs = append(configs, workerstate.DeviceConfig{
+			DeviceIdx:  uint32(i),
+			DeviceUUID: deviceInfo.UUID,
+			UpLimit:    100, // No compute throttling for now
+			MemLimit:   vramLimit,
+		})
+	}
+
+	handle, err := workerstate.CreateSharedMemoryHandle(podPath, configs)
+	if err != nil {
+		klog.Errorf("Failed to create SHM for worker %s at %s: %v", request.WorkerUID, podPath, err)
+		return
+	}
+
+	a.shmHandles[request.WorkerUID] = handle
+	klog.Infof("Created SHM for worker %s at %s (vram_limit=%d, devices=%d)", request.WorkerUID, podPath, vramLimit, len(configs))
 }
 
 // DeallocateWorker deallocates devices for a worker
@@ -130,6 +195,15 @@ func (a *AllocationController) DeallocateWorker(workerUID string) error {
 				// Continue deallocating other resources even if partition removal fails
 			}
 		}
+	}
+
+	// Clean up shared memory
+	if handle, exists := a.shmHandles[workerUID]; exists {
+		shmBasePath := a.shmBasePath
+		if err := handle.Cleanup(&shmBasePath); err != nil {
+			klog.Errorf("failed to cleanup SHM for worker %s: %v", workerUID, err)
+		}
+		delete(a.shmHandles, workerUID)
 	}
 
 	klog.Infof("worker %s deallocated", workerUID)

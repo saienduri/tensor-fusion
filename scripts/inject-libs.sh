@@ -4,7 +4,7 @@
 # Sets up GPU interception for different isolation modes:
 # - shared: No interception, direct GPU access
 # - remote: HIP/CUDA API forwarding over network (GPU-over-IP)
-# - soft/hard: Local interception with resource limiting (TODO)
+# - soft/hard: Local interception with resource limiting (AMD: hip-limiter)
 
 set -e
 
@@ -74,18 +74,34 @@ elif [ "${ISOLATION_MODE}" = "shared" ]; then
     echo "TensorFusion: Init complete (pass-through mode)"
     
 else
-    # Soft/Hard modes: Need interception (requires limiter library)
-    echo "Soft/hard isolation modes - setting up resource limiting"
-    
+    # Soft/Hard isolation modes: Intercept GPU calls with vendor-specific limiter
+    echo "Setting up ${ISOLATION_MODE} isolation for ${HARDWARE_VENDOR}"
+
     if [ "${HARDWARE_VENDOR}" = "AMD" ]; then
-        echo "TODO: AMD soft/hard isolation modes not yet implemented"
-        echo "Falling back to shared mode behavior"
+        HIP_LIMITER="/usr/lib/tensor-fusion/libhip_limiter.so"
+
+        if [ -f "${HIP_LIMITER}" ]; then
+            echo "Copying HIP limiter for memory enforcement"
+            cp "${HIP_LIMITER}" "${LIBS_DIR}/"
+
+            # Configure ld.so.preload so glibc intercepts HIP calls at process startup
+            echo "${LIBS_DIR}/libhip_limiter.so" > "${CONF_DIR}/ld.so.preload"
+
+            # Add library directory to linker search path
+            echo "${LIBS_DIR}" > "${CONF_DIR}/zz_tensor-fusion.conf"
+
+            echo "HIP limiter staged for ${ISOLATION_MODE} isolation"
+        else
+            echo "WARNING: HIP limiter not found at ${HIP_LIMITER}"
+            touch "${CONF_DIR}/ld.so.preload"
+            touch "${CONF_DIR}/zz_tensor-fusion.conf"
+        fi
+    else
+        # NVIDIA path handled by bootstrap binary, not this script
+        touch "${CONF_DIR}/ld.so.preload"
+        touch "${CONF_DIR}/zz_tensor-fusion.conf"
     fi
-    
-    # Create empty config files for now
-    touch "${CONF_DIR}/ld.so.preload"
-    touch "${CONF_DIR}/zz_tensor-fusion.conf"
-    
-    echo "TensorFusion: Init complete (pass-through mode)"
+
+    echo "TensorFusion: Init complete (${ISOLATION_MODE} isolation)"
 fi
 

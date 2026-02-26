@@ -42,9 +42,9 @@ var _ = Describe("Compose Utils", func() {
 
 	Describe("SetWorkerContainerSpec", func() {
 		DescribeTable("configures worker container correctly",
-			func(workerImage, disabledFeatures string, sharedMemMode bool, expectCommand []string) {
+			func(gpuVendor, workerImage, disabledFeatures string, sharedMemMode bool, expectCommand []string) {
 				container := &corev1.Container{}
-				workloadProfile := &tfv1.WorkloadProfileSpec{}
+				workloadProfile := &tfv1.WorkloadProfileSpec{GPUVendor: gpuVendor}
 				workerConfig := &tfv1.WorkerConfig{
 					Image: workerImage,
 				}
@@ -58,8 +58,11 @@ var _ = Describe("Compose Utils", func() {
 				}
 
 				// Verify command is set correctly
-				Expect(container.Command).NotTo(BeEmpty(), "container command should not be empty")
-				Expect(container.Command).To(Equal(expectCommand), "container command should match expected value")
+				if expectCommand != nil {
+					Expect(container.Command).To(Equal(expectCommand), "container command should match expected value")
+				} else {
+					Expect(container.Command).To(BeNil())
+				}
 
 				// Verify shared memory mode specific setup
 				if sharedMemMode && disabledFeatures == "" {
@@ -74,20 +77,61 @@ var _ = Describe("Compose Utils", func() {
 					Expect(container.Command[2]).To(ContainSubstring("-M 256"), "should specify shared memory size")
 				}
 			},
-			Entry("basic worker config", "worker:latest", "", false, []string{
+			Entry("basic worker config", "", "worker:latest", "", false, []string{
 				"./tensor-fusion-worker",
 				"-p",
 				"8000",
 			}),
-			Entry("worker with shared memory mode", "worker:latest", "", true, []string{
+			Entry("NVIDIA worker config", "NVIDIA", "worker:latest", "", false, []string{
+				"./tensor-fusion-worker",
+				"-p",
+				"8000",
+			}),
+			Entry("AMD worker uses entrypoint", "AMD", "worker:latest", "", false, nil),
+			Entry("worker with shared memory mode", "", "worker:latest", "", true, []string{
 				"/bin/bash",
 				"-c",
 				"touch /dev/shm/tf_shm && chmod 666 /dev/shm/tf_shm && exec ./tensor-fusion-worker -n shmem -m tf_shm -M 256",
 			}),
-			Entry("worker with disabled start-worker feature", "worker:latest", "start-worker", false, []string{
+			Entry("worker with disabled start-worker feature", "", "worker:latest", "start-worker", false, []string{
 				"sleep",
 				"infinity",
 			}),
 		)
 	})
+
+	Describe("SetWorkerContainerSpec LD_PRELOAD", func() {
+		DescribeTable("sets correct limiter path per vendor",
+			func(gpuVendor, disabledFeatures, expectLdPreload string, expectNoLdPreload bool) {
+				container := &corev1.Container{}
+				workloadProfile := &tfv1.WorkloadProfileSpec{GPUVendor: gpuVendor}
+				workerConfig := &tfv1.WorkerConfig{Image: "test:latest"}
+				hypervisorConfig := &tfv1.HypervisorConfig{}
+
+				utils.SetWorkerContainerSpec(container, workloadProfile, workerConfig, hypervisorConfig, disabledFeatures, false)
+
+				ldPreload := findEnv(container.Env, "LD_PRELOAD")
+				if expectNoLdPreload {
+					Expect(ldPreload).To(BeNil())
+				} else {
+					Expect(ldPreload).NotTo(BeNil())
+					Expect(ldPreload.Value).To(Equal(expectLdPreload))
+				}
+			},
+			Entry("NVIDIA gets cuda limiter", "NVIDIA", "", "/home/app/libcuda_limiter.so", false),
+			Entry("AMD gets hip limiter", "AMD", "", "/usr/lib/tensor-fusion/libhip_limiter.so", false),
+			Entry("default gets cuda limiter", "", "", "/home/app/libcuda_limiter.so", false),
+			Entry("NVIDIA with gpu-limiter disabled", "NVIDIA", "gpu-limiter", "", true),
+			Entry("AMD with gpu-limiter disabled", "AMD", "gpu-limiter", "", true),
+		)
+	})
 })
+
+func findEnv(envs []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range envs {
+		if envs[i].Name == name {
+			return &envs[i]
+		}
+	}
+	return nil
+}

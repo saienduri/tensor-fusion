@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -625,6 +627,83 @@ func TestSharedMemoryHandleCleanup(t *testing.T) {
 
 	// File should be removed
 	assert.False(t, fileExists(shmPath))
+}
+
+func TestRustBinaryLayoutCompatibility(t *testing.T) {
+	// Verify that Go struct sizes match Rust layout expectations.
+	// If these fail, the Rust layout constants need updating.
+	assert.Equal(t, uintptr(136), unsafe.Sizeof(DeviceEntryV2{}),
+		"DeviceEntryV2 size must match Rust layout")
+	assert.Equal(t, uintptr(64), unsafe.Sizeof(SharedDeviceInfoV2{}),
+		"SharedDeviceInfoV2 size must match Rust layout")
+
+	// Verify PIDs field offset matches our constant
+	var s SharedDeviceStateV2
+	assert.Equal(t, uintptr(rustV2PidsOffset), unsafe.Offsetof(s.PIDs),
+		"PIDs offset must match rustV2PidsOffset constant")
+
+	// Create SHM and verify the file size and format
+	configs := []DeviceConfig{
+		{DeviceIdx: 0, DeviceUUID: "amd-gpu-0000:03:00.0", UpLimit: 100, MemLimit: 16 * 1024 * 1024 * 1024},
+		{DeviceIdx: 1, DeviceUUID: "amd-gpu-0000:04:00.0", UpLimit: 80, MemLimit: 8 * 1024 * 1024 * 1024},
+	}
+
+	podPath := filepath.Join(testShmBasePath, "rust_compat_test", "test_pod")
+	defer func() {
+		_ = os.RemoveAll(filepath.Join(testShmBasePath, "rust_compat_test"))
+	}()
+
+	handle, err := CreateSharedMemoryHandle(podPath, configs)
+	require.NoError(t, err)
+	defer func() {
+		_ = handle.Close()
+	}()
+
+	// Verify file size matches Rust SharedDeviceState
+	shmPath := filepath.Join(podPath, ShmPathSuffix)
+	stat, err := os.Stat(shmPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(rustSharedDeviceStateTotalSize), stat.Size(),
+		"SHM file size must match Rust SharedDeviceState size")
+
+	// Read the file and verify the enum discriminant
+	fileBytes, err := os.ReadFile(shmPath)
+	require.NoError(t, err)
+	discriminant := binary.LittleEndian.Uint32(fileBytes[0:4])
+	assert.Equal(t, rustV2Discriminant, discriminant,
+		"Enum discriminant must be V2 (1)")
+
+	// Verify padding after discriminant is zero
+	assert.Equal(t, uint32(0), binary.LittleEndian.Uint32(fileBytes[4:8]),
+		"Enum padding must be zero")
+
+	// Verify device data is accessible through the handle
+	state := handle.GetState()
+	assert.Equal(t, 2, state.DeviceCount())
+	assert.True(t, state.HasDevice(0))
+	assert.True(t, state.HasDevice(1))
+	assert.False(t, state.HasDevice(2))
+
+	// Verify heartbeat works through the mmap
+	now := uint64(time.Now().Unix())
+	state.UpdateHeartbeat(now)
+	assert.Equal(t, now, state.GetLastHeartbeat())
+
+	// Verify device memory limits are readable
+	state.SetPodMemoryUsed(0, 1024*1024)
+	assert.Equal(t, uint64(1024*1024), state.GetPodMemoryUsed(0))
+
+	// Verify re-opening reads the same data
+	handle2, err := OpenSharedMemoryHandle(podPath)
+	require.NoError(t, err)
+	defer func() {
+		_ = handle2.Close()
+	}()
+
+	state2 := handle2.GetState()
+	assert.Equal(t, 2, state2.DeviceCount())
+	assert.Equal(t, now, state2.GetLastHeartbeat())
+	assert.Equal(t, uint64(1024*1024), state2.GetPodMemoryUsed(0))
 }
 
 // Helper function to check if file exists

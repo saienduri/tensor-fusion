@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
@@ -19,6 +20,44 @@ const (
 	MaxDevices    = 16
 	MaxUUIDLen    = 64
 	ShmPathSuffix = "shm"
+)
+
+// Rust binary layout constants.
+// These must match the #[repr(C)] struct definitions in
+// vgpu.rs/crates/utils/src/shared_memory/mod.rs
+//
+// The Rust limiter reads SharedDeviceState as a #[repr(C)] enum:
+//
+//	enum SharedDeviceState { V1(SharedDeviceStateV1), V2(SharedDeviceStateV2) }
+//
+// Binary layout: [4-byte discriminant][4-byte pad][V2 variant data...]
+const (
+	// V2 enum discriminant value (V1=0, V2=1)
+	rustV2Discriminant uint32 = 1
+
+	// Enum header: 4-byte discriminant + 4-byte alignment padding
+	rustEnumHeaderSize = 8
+
+	// Size of a DeviceEntryV2 in both Go and Rust (must match)
+	// = UUID(64) + SharedDeviceInfoV2(64) + IsActive(4) + pad(4)
+	rustDeviceEntryV2Size = 136
+
+	// Byte offset of the pids field within Rust's SharedDeviceStateV2
+	// = devices(16*136) + device_count(4) + pad(4) + last_heartbeat(8)
+	rustV2PidsOffset = MaxDevices*rustDeviceEntryV2Size + 4 + 4 + 8
+
+	// Size of Rust's ShmMutex<Set<usize, MAX_PROCESSES>>:
+	// lock: AtomicUsize(8) + Set<usize,2048>(16384+16384+8) + pid: usize(8)
+	rustShmMutexSetSize = 8 + (MaxProcesses*8 + MaxProcesses*8 + 8) + 8
+
+	// Padding at end of Rust SharedDeviceStateV2
+	rustStatePaddingSize = 512
+
+	// Total size of Rust SharedDeviceState in memory
+	rustSharedDeviceStateTotalSize = rustEnumHeaderSize +
+		rustV2PidsOffset +
+		rustShmMutexSetSize +
+		rustStatePaddingSize
 )
 
 // RefCountError represents errors in reference count operations
@@ -804,38 +843,39 @@ type SharedMemoryHandle struct {
 	fileSize int64
 }
 
-// CreateSharedMemoryHandle creates a new shared memory handle
+// CreateSharedMemoryHandle creates a new shared memory handle.
+// The file is written in the Rust SharedDeviceState binary layout so that
+// the hip-limiter / cuda-limiter can mmap and read it directly.
 func CreateSharedMemoryHandle(podPath string, configs []DeviceConfig) (*SharedMemoryHandle, error) {
 	shmPath := filepath.Join(podPath, ShmPathSuffix)
 
-	// Create directory if it doesn't exist
 	if err := os.MkdirAll(podPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Calculate size needed for SharedDeviceStateV2
-	stateSize := int(unsafe.Sizeof(SharedDeviceStateV2{}))
-
-	// Create or open the file
 	file, err := os.OpenFile(shmPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %w", err)
 	}
 
-	// Truncate to the required size
-	if err := file.Truncate(int64(stateSize)); err != nil {
+	// Truncate to the Rust SharedDeviceState size (zero-fills the entire region,
+	// which is the correct initial state for the pids ShmMutex and padding).
+	if err := file.Truncate(int64(rustSharedDeviceStateTotalSize)); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("failed to truncate file: %w", err)
 	}
 
-	// Memory map the file
-	data, err := syscall.Mmap(int(file.Fd()), 0, stateSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	data, err := syscall.Mmap(int(file.Fd()), 0, rustSharedDeviceStateTotalSize,
+		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("failed to mmap: %w", err)
 	}
 
-	// Initialize the state
+	// Write the Rust enum discriminant for V2 variant (little-endian u32).
+	binary.LittleEndian.PutUint32(data[0:4], rustV2Discriminant)
+
+	// Initialize Go state on the heap (sets up device entries, heartbeat, etc.)
 	state, err := NewSharedDeviceStateV2(configs)
 	if err != nil {
 		_ = syscall.Munmap(data)
@@ -843,24 +883,24 @@ func CreateSharedMemoryHandle(podPath string, configs []DeviceConfig) (*SharedMe
 		return nil, err
 	}
 
-	// Copy the state to the mapped memory
-	stateBytes := (*[1 << 30]byte)(unsafe.Pointer(state))[:stateSize:stateSize]
-	copy(data, stateBytes)
+	// Copy device data into the mmap after the enum header.
+	// Only copy the region before the PIDs field (devices + device_count + pad + heartbeat).
+	// The Go PIDs field is an 8-byte pointer (not SHM-safe), while Rust expects an
+	// inline ShmMutex<Set<usize, 2048>> (32792 bytes). The zeroed pids region is the
+	// correct initial state (lock=0 means unlocked).
+	stateBytes := (*[1 << 30]byte)(unsafe.Pointer(state))[:rustV2PidsOffset:rustV2PidsOffset]
+	copy(data[rustEnumHeaderSize:], stateBytes)
 
-	// Get a pointer to the mapped state
-	mappedState := (*SharedDeviceStateV2)(unsafe.Pointer(&data[0]))
-
-	// Initialize the PIDs mutex in the mapped memory
-	// Note: This is a simplified version - in a real implementation,
-	// you'd need to properly initialize the mutex for shared memory
-	mappedState.PIDs = NewShmMutex(NewPIDSet())
+	// Point the Go struct at the V2 data region for ongoing heartbeat updates.
+	// The Go struct layout matches Rust for all fields before PIDs.
+	mappedState := (*SharedDeviceStateV2)(unsafe.Pointer(&data[rustEnumHeaderSize]))
 
 	return &SharedMemoryHandle{
 		path:     shmPath,
 		data:     data,
 		state:    &SharedDeviceState{V2: mappedState},
 		file:     file,
-		fileSize: int64(stateSize),
+		fileSize: int64(rustSharedDeviceStateTotalSize),
 	}, nil
 }
 
@@ -868,13 +908,11 @@ func CreateSharedMemoryHandle(podPath string, configs []DeviceConfig) (*SharedMe
 func OpenSharedMemoryHandle(podPath string) (*SharedMemoryHandle, error) {
 	shmPath := filepath.Join(podPath, ShmPathSuffix)
 
-	// Open the file
 	file, err := os.OpenFile(shmPath, os.O_RDWR, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
-	// Get file size
 	stat, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
@@ -883,15 +921,20 @@ func OpenSharedMemoryHandle(podPath string) (*SharedMemoryHandle, error) {
 
 	fileSize := stat.Size()
 
-	// Memory map the file
 	data, err := syscall.Mmap(int(file.Fd()), 0, int(fileSize), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("failed to mmap: %w", err)
 	}
 
-	// Get a pointer to the mapped state (assume V2 for now)
-	mappedState := (*SharedDeviceStateV2)(unsafe.Pointer(&data[0]))
+	// Determine the data offset: Rust-compatible files have an enum header,
+	// legacy Go files start at offset 0.
+	offset := 0
+	if fileSize >= int64(rustSharedDeviceStateTotalSize) {
+		offset = rustEnumHeaderSize
+	}
+
+	mappedState := (*SharedDeviceStateV2)(unsafe.Pointer(&data[offset]))
 
 	return &SharedMemoryHandle{
 		path:     shmPath,

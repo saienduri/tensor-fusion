@@ -85,6 +85,11 @@ COPY --from=builder /workspace/provider/build/test_amd_provider /build/bin/
 # Makefile outputs to current directory
 COPY --from=builder /workspace/provider/amd/libhip_client_stub.so /build/lib/
 
+# Copy pre-built HIP limiter for VRAM enforcement (built from vgpu.rs hip-limiter crate)
+# Used by: worker containers (local GPU mode via LD_PRELOAD) and
+#          init container (stages to shared volume for client pods via ld.so.preload)
+COPY artifacts/libhip_limiter.so /usr/lib/tensor-fusion/libhip_limiter.so
+
 # Copy init container entrypoint script
 COPY scripts/inject-libs.sh /build/bin/
 RUN chmod +x /build/bin/inject-libs.sh
@@ -96,6 +101,7 @@ hardwareVendor: AMD\n\
 releaseDate: \"$(date -I)\"\n\
 isolationModes:\n\
   - shared\n\
+  - soft\n\
   - remote\n\
 rocmDistribution: TheRock\n\
 rocmVersion: ${ROCM_VERSION}" > /build/metadata.yaml

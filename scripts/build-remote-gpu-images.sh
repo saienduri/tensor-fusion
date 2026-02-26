@@ -111,15 +111,36 @@ echo ""
 
 cd "$PROJECT_ROOT"
 
-# Build AMD provider image (includes HIP client stub)
+# Build HIP limiter and stage artifact
+# Both provider and worker images need libhip_limiter.so, so build it first
+if [ "$BUILD_PROVIDER" = true ] || [ "$BUILD_WORKER" = true ]; then
+    echo "========================================"
+    echo "Building HIP Limiter (vgpu.rs)"
+    echo "========================================"
+    VGPU_RS_DIR="${PROJECT_ROOT}/../vgpu.rs"
+    if [ ! -d "$VGPU_RS_DIR" ]; then
+        VGPU_RS_DIR="${PROJECT_ROOT}/../../projects/vgpu.rs"
+    fi
+    mkdir -p "${PROJECT_ROOT}/artifacts"
+    if [ -d "$VGPU_RS_DIR" ]; then
+        (cd "$VGPU_RS_DIR" && cargo build --release -p hip-limiter)
+        cp "${VGPU_RS_DIR}/target/release/libhip_limiter.so" "${PROJECT_ROOT}/artifacts/"
+    elif [ ! -f "${PROJECT_ROOT}/artifacts/libhip_limiter.so" ]; then
+        echo "ERROR: Cannot find vgpu.rs or pre-built artifacts/libhip_limiter.so"
+        exit 1
+    fi
+    echo ""
+fi
+
+# Build AMD provider image (includes HIP client stub + limiter)
 if [ "$BUILD_PROVIDER" = true ]; then
     echo "========================================"
     echo "Building AMD Provider Image"
     echo "========================================"
     echo "Image: ${PROVIDER_IMAGE}"
-    echo "Contains: ROCm, provider library, HIP client stub"
+    echo "Contains: ROCm, provider library, HIP client stub, HIP limiter"
     echo ""
-    
+
     docker build \
         -f dockerfile/amd-provider.Dockerfile \
         --build-arg ROCM_VERSION="${ROCM_VERSION}" \
@@ -127,10 +148,10 @@ if [ "$BUILD_PROVIDER" = true ]; then
         --build-arg RELEASE_TYPE="${RELEASE_TYPE}" \
         -t "${PROVIDER_IMAGE}" \
         .
-    
+
     echo ""
     echo "[OK] Provider image built: ${PROVIDER_IMAGE}"
-    
+
     # Show image size
     docker images "${PROVIDER_IMAGE}" --format "Size: {{.Size}}"
     echo ""
@@ -190,7 +211,7 @@ echo "========================================"
 if [ "$BUILD_PROVIDER" = true ]; then
     echo "Provider: ${PROVIDER_IMAGE}"
     echo "  - Used by: TensorFusion init container"
-    echo "  - Contains: libhip_client_stub.so, libaccelerator_amd.so"
+    echo "  - Contains: libhip_client_stub.so, libaccelerator_amd.so, libhip_limiter.so"
 fi
 
 if [ "$BUILD_WORKER" = true ]; then

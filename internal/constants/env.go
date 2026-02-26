@@ -114,8 +114,9 @@ const (
 	NGPUPathEnv   = "TENSOR_FUSION_NGPU_PATH"
 	NGPUPathValue = TFLibsVolumeMountPath + "/libcuda.so"
 
-	LdPreloadEnv     = "LD_PRELOAD"
-	LdPreloadLimiter = "/home/app/libcuda_limiter.so"
+	LdPreloadEnv        = "LD_PRELOAD"
+	LdPreloadLimiter    = "/home/app/libcuda_limiter.so"
+	LdPreloadHipLimiter = "/usr/lib/tensor-fusion/libhip_limiter.so"
 
 	SharedMemMountSubPath = "/shm"
 

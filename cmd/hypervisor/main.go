@@ -69,6 +69,10 @@ func main() {
 		acceleratorVendor = ptr.To(vendor)
 		klog.Infof("Hardware vendor from env: %s", vendor)
 	}
+	if envIsolation := os.Getenv("TF_ISOLATION_MODE"); envIsolation != "" {
+		isolationMode = ptr.To(envIsolation)
+		klog.Infof("Isolation mode from env: %s", envIsolation)
+	}
 
 	// Create and start device controller
 	deviceController, err := device.NewController(ctx, libPath, *acceleratorVendor, *discoveryInterval, *isolationMode)

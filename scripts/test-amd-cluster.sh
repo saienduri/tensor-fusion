@@ -238,12 +238,12 @@ echo ""
 echo "Step 8: Deploying test workload..."
 echo "========================================"
 echo ""
-echo "Note: VRAM/TFLOPS limits for AMD GPUs currently provide:"
+echo "Note: VRAM/TFLOPS limits for AMD GPUs with soft isolation provide:"
 echo "  ✓ Scheduler-level placement (ensures pod goes to node with capacity)"
 echo "  ✓ Monitoring and metrics (tracks usage vs limits)"
-echo "  ✗ Hard enforcement (workloads can exceed limits without being stopped)"
+echo "  ✓ Memory enforcement via hip-limiter (hipMemGetInfo spoofed, hipMalloc capped)"
 echo ""
-echo "Hard limit enforcement requires ROCm containers/cgroups integration (future work)."
+echo "Compute enforcement (kernel launch throttling) is not yet implemented."
 echo ""
 
 cat <<EOF | kubectl apply -f -
@@ -257,7 +257,7 @@ metadata:
     tensor-fusion.ai/enabled: 'true'
   annotations:
     # TensorFusion annotations for GPU resource requests
-    # These control scheduling and monitoring, but NOT hard enforcement (yet)
+    # "soft" isolation enables hip-limiter memory hooks via LD_PRELOAD
     tensor-fusion.ai/inject-container: "rocm-test"
     tensor-fusion.ai/pool: "amd-tensor-fusion-cluster-amd-gpu-pool"
     tensor-fusion.ai/vram-request: "16Gi"
@@ -265,7 +265,7 @@ metadata:
     tensor-fusion.ai/tflops-request: "100"
     tensor-fusion.ai/tflops-limit: "100"
     tensor-fusion.ai/is-local-gpu: "true"
-    tensor-fusion.ai/isolation: "shared"
+    tensor-fusion.ai/isolation: "soft"
 spec:
   containers:
   - name: rocm-test

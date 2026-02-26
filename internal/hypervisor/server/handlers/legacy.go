@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	tfv1 "github.com/NexusGPU/tensor-fusion/api/v1"
 	"github.com/NexusGPU/tensor-fusion/internal/hypervisor/api"
@@ -101,47 +102,96 @@ func (h *LegacyHandler) HandleTrap(c *gin.Context) {
 }
 
 // HandleGetPods handles GET /api/v1/pod
+// Returns PodInfoResponse format expected by cuda-limiter and hip-limiter.
+// Query params: pod_name, pod_namespace (primary match), container_pid, container_name.
 func (h *LegacyHandler) HandleGetPods(c *gin.Context) {
 	// Only available when k8s backend is enabled
 	if h.backend == nil {
-		c.JSON(http.StatusServiceUnavailable, api.ErrorResponse{Error: "kubernetes backend not enabled"})
+		c.JSON(http.StatusServiceUnavailable, api.PodInfoResponse{
+			Success: false,
+			Message: "kubernetes backend not enabled",
+		})
 		return
 	}
 
 	workers, err := h.workerController.ListWorkers()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, api.ErrorResponse{Error: err.Error()})
+		c.JSON(http.StatusInternalServerError, api.PodInfoResponse{
+			Success: false,
+			Message: err.Error(),
+		})
 		return
 	}
 
-	pods := make([]api.PodInfo, 0)
+	podName := c.Query("pod_name")
+	podNamespace := c.Query("pod_namespace")
+
+	var fallback *api.WorkerAllocation
 	for _, worker := range workers {
 		allocation, exists := h.allocationController.GetWorkerAllocation(worker.WorkerUID)
-		if !exists || allocation == nil {
+		if !exists || allocation == nil || allocation.WorkerInfo == nil {
 			continue
 		}
 
-		var vramLimit *uint64
-		var tflopsLimit *float64
-		if allocation.WorkerInfo != nil {
-			if allocation.WorkerInfo.Limits.Vram.Value() > 0 {
-				vramLimit = ptr.To(uint64(allocation.WorkerInfo.Limits.Vram.Value()))
-			}
-			if allocation.WorkerInfo.Limits.Tflops.Value() > 0 {
-				tflopsLimit = ptr.To(allocation.WorkerInfo.Limits.Tflops.AsApproximateFloat64())
+		// Match by pod name + namespace when provided by the limiter
+		if podName != "" && podNamespace != "" {
+			if allocation.WorkerInfo.WorkerName == podName && allocation.WorkerInfo.Namespace == podNamespace {
+				h.respondWithAllocation(c, allocation)
+				return
 			}
 		}
-		pods = append(pods, api.PodInfo{
-			PodName:     getAllocationPodName(allocation),
-			Namespace:   getAllocationNamespace(allocation),
-			GPUIDs:      getDeviceUUIDs(allocation),
-			TflopsLimit: tflopsLimit,
-			VramLimit:   vramLimit,
-			QoSLevel:    allocation.WorkerInfo.QoS,
-		})
+
+		// Track first valid allocation as fallback
+		if fallback == nil {
+			fallback = allocation
+		}
 	}
 
-	c.JSON(http.StatusOK, api.ListPodsResponse{Pods: pods})
+	// Fall back to first allocation (backward compat for older limiters without pod_name)
+	if fallback != nil {
+		h.respondWithAllocation(c, fallback)
+		return
+	}
+
+	c.JSON(http.StatusOK, api.PodInfoResponse{
+		Success: false,
+		Message: "no worker allocations found",
+	})
+}
+
+func (h *LegacyHandler) respondWithAllocation(c *gin.Context, allocation *api.WorkerAllocation) {
+	var vramLimit *uint64
+	var tflopsLimit *float64
+	if allocation.WorkerInfo.Limits.Vram.Value() > 0 {
+		vramLimit = ptr.To(uint64(allocation.WorkerInfo.Limits.Vram.Value()))
+	}
+	if allocation.WorkerInfo.Limits.Tflops.Value() > 0 {
+		tflopsLimit = ptr.To(allocation.WorkerInfo.Limits.Tflops.AsApproximateFloat64())
+	}
+
+	c.JSON(http.StatusOK, api.PodInfoResponse{
+		Success: true,
+		Data: &api.PodInfo{
+			PodName:      getAllocationPodName(allocation),
+			Namespace:    getAllocationNamespace(allocation),
+			GPUIDs:       getDeviceUUIDs(allocation),
+			TflopsLimit:  tflopsLimit,
+			VramLimit:    vramLimit,
+			QoSLevel:     qosToPascalCase(string(allocation.WorkerInfo.QoS)),
+			ComputeShard: false,
+			Isolation:    ptr.To(string(allocation.WorkerInfo.IsolationMode)),
+		},
+		Message: "ok",
+	})
+}
+
+// qosToPascalCase converts lowercase QoS levels ("low", "medium", "high", "critical")
+// to PascalCase ("Low", "Medium", "High", "Critical") as expected by the Rust limiters.
+func qosToPascalCase(qos string) string {
+	if qos == "" {
+		return ""
+	}
+	return strings.ToUpper(qos[:1]) + qos[1:]
 }
 
 // Helper functions for WorkerAllocation field access

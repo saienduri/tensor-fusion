@@ -64,19 +64,25 @@ type TrapResponse struct {
 	SnapshotCount int    `json:"snapshot_count"`
 }
 
-// PodInfo represents pod information for the /api/v1/pod endpoint (used in legacy.go)
-type PodInfo struct {
-	PodName     string        `json:"pod_name"`
-	Namespace   string        `json:"namespace"`
-	GPUIDs      []string      `json:"gpu_uuids"`
-	TflopsLimit *float64      `json:"tflops_limit,omitempty"`
-	VramLimit   *uint64       `json:"vram_limit,omitempty"`
-	QoSLevel    tfv1.QoSLevel `json:"qos_level,omitempty"`
+// PodInfoResponse is the response format expected by cuda-limiter and hip-limiter.
+// Matches the PodInfoResponse struct defined in the vgpu.rs api-types crate.
+type PodInfoResponse struct {
+	Success bool     `json:"success"`
+	Data    *PodInfo `json:"data,omitempty"`
+	Message string   `json:"message"`
 }
 
-// ListPodsResponse represents the response from GET /api/v1/pod (used in legacy.go)
-type ListPodsResponse struct {
-	Pods []PodInfo `json:"pods"`
+// PodInfo represents pod information for the /api/v1/pod endpoint (used in legacy.go).
+// Field names and QoS casing must match the vgpu.rs api-types PodInfo struct.
+type PodInfo struct {
+	PodName      string   `json:"pod_name"`
+	Namespace    string   `json:"namespace"`
+	GPUIDs       []string `json:"gpu_uuids"`
+	TflopsLimit  *float64 `json:"tflops_limit,omitempty"`
+	VramLimit    *uint64  `json:"vram_limit,omitempty"`
+	QoSLevel     string   `json:"qos_level,omitempty"`
+	ComputeShard bool     `json:"compute_shard"`
+	Isolation    *string  `json:"isolation,omitempty"`
 }
 
 // ProcessInfo represents process mapping information (used in legacy.go)

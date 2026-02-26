@@ -46,6 +46,7 @@ logs
 *.prof
 
 provider/build
+artifacts/
 
 cmd/hypervisor/hypervisor
 *.o

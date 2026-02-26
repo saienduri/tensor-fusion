@@ -208,7 +208,7 @@ metadata:
   annotations:
     tensor-fusion.ai/inject-container: "test"
     tensor-fusion.ai/pool: "$ACTUAL_GPUPOOL_NAME"
-    tensor-fusion.ai/isolation: "shared"
+    tensor-fusion.ai/isolation: "soft"
     tensor-fusion.ai/vram-request: "4Gi"
     tensor-fusion.ai/vram-limit: "4Gi"
 spec:
