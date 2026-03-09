@@ -546,29 +546,45 @@ func (s *SharedDeviceStateV2) IsHealthy(timeout time.Duration) bool {
 	return now-lastHeartbeat <= uint64(timeout.Seconds())
 }
 
-// AddPID adds a PID to the set
+// AddPID adds a PID to the set.
+// No-op when PIDs is nil (mmap-backed state has no Go-side PID tracking).
 func (s *SharedDeviceStateV2) AddPID(pid int) {
+	if s.PIDs == nil {
+		return
+	}
 	s.PIDs.Lock()
 	defer s.PIDs.Unlock()
 	s.PIDs.Value.InsertIfAbsent(pid)
 }
 
-// RemovePID removes a PID from the set
+// RemovePID removes a PID from the set.
+// No-op when PIDs is nil (mmap-backed state has no Go-side PID tracking).
 func (s *SharedDeviceStateV2) RemovePID(pid int) {
+	if s.PIDs == nil {
+		return
+	}
 	s.PIDs.Lock()
 	defer s.PIDs.Unlock()
 	s.PIDs.Value.RemoveValue(pid)
 }
 
-// GetAllPIDs returns all PIDs currently stored
+// GetAllPIDs returns all PIDs currently stored.
+// Returns nil when PIDs is nil (mmap-backed state has no Go-side PID tracking).
 func (s *SharedDeviceStateV2) GetAllPIDs() []int {
+	if s.PIDs == nil {
+		return nil
+	}
 	s.PIDs.Lock()
 	defer s.PIDs.Unlock()
 	return s.PIDs.Value.Values()
 }
 
-// CleanupOrphanedLocks cleans up any orphaned locks
+// CleanupOrphanedLocks cleans up any orphaned locks.
+// No-op when PIDs is nil (mmap-backed state has no Go-side PID tracking).
 func (s *SharedDeviceStateV2) CleanupOrphanedLocks() {
+	if s.PIDs == nil {
+		return
+	}
 	s.PIDs.CleanupOrphanedLock()
 }
 
@@ -713,7 +729,9 @@ func (d *SharedDeviceInfoV2) LoadERLTokenState() (float64, float64) {
 	return d.GetERLCurrentTokens(), d.GetERLLastTokenUpdate()
 }
 
-// StoreERLTokenState stores the token state atomically
+// StoreERLTokenState stores tokens and timestamp via two separate atomic stores.
+// A concurrent reader may see new tokens with old timestamp or vice versa (torn read).
+// This is acceptable for ERL's purposes: the PID controller self-corrects on the next tick.
 func (d *SharedDeviceInfoV2) StoreERLTokenState(tokens, timestamp float64) {
 	d.SetERLCurrentTokens(tokens)
 	d.SetERLLastTokenUpdate(timestamp)
@@ -978,3 +996,4 @@ func (h *SharedMemoryHandle) Cleanup(stopAtPath *string) error {
 	}
 	return CleanupEmptyParentDirectories(h.path, nil)
 }
+
